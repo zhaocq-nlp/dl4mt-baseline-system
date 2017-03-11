@@ -1,0 +1,57 @@
+本目录下的dl4mt/session2是一个BLEU驱动的版本
+
+如各位所知，session2原始的流程是，以mini-batch更新参数的次数计(uidx)，每saveFreq存一次模型，这个模型是当前验证集上Cost (valid_err)最小的模型。
+但是，我们最终的评价指标是BLEU，而如今用GPU解码又快的飞起，所以我更新了一下session2中这一部分流程：
+	1. 迭代开始，隔一定的uidx，使用python的subprocess模块新建一个子进程对模型进行解码（当然这一步要先存下模型）；
+	2. 这个解码进程会在后台运行，主进程继续更新；
+	3. 又隔了一定的uidx，主进程检查解码进程是否完毕，没结束就挂起等待。结束了就测BLEU并作记录；
+	4. 存下当前的模型并又起了一个子进程进行解码，然后回到步骤2，直到终止条件达成（达到最大迭代轮次）。
+此外，随着迭代的进行，如果BLEU涨幅超过20%就会把对应旧的模型文件删掉。
+
+
+使用：
+
+一、 train_nmt.py 
+1. 提供关于解码测BLEU相关的参数配置
+bleuvalid_params = {
+	 'translate_script': './translate.py', # session2里面那个解码的python文件
+     'tmp_dir': './tmp_trans/',	# 存储中间每次解码得到译文文件
+     'bleu_script': './multi-bleu.perl', # 测BLEU的程序
+     'valid_src': '../data/MT02/ch',	# 验证集源端
+     'valid_trg': '../data/MT02/en',	# 验证集参考译文
+     'val_burn_in': 100000,
+     'valid_freq': 10000,
+     'val_burn_in_fine': 150000,
+     'valid_freq_fine': 4000,
+     'valid_freq_final': 1500,
+}
+这里一起解释下最后的四个参数：
+当程序的更新次数 uidx < val_burn_in时，只根据主要配置里的saveFreq存参数，不解码（用于程序恢复reload使用）；
+当 val_burn_in <= uidx < val_burn_in_fine时，每隔valid_freq次update就存参数并解码算BLEU；
+当 val_burn_in_fine <= uidx < 2*val_burn_in时，每隔valid_freq_fine次update就存参数并解码算BLEU；
+当 2*val_burn_in <= uidx 时，每隔valid_freq_fine/2次update就存参数并解码；
+当 2*val_burn_in_fine <= uidx 时，每min(valid_freq_final, valid_freq_fine/2)次update就存参数并解码；
+以上100,000、10,000、150,000、4,000、1,500是batch80的推荐配置，如果是batch32则可以稍微增加一点burn_in
+
+!!!!!!!!!!
+并且，亲测，dl4mt默认配置下，每更新20,000轮会耗时将近2小时，而GPU解码一个文件(dev集用MT02的话也就878行)不到20分钟，因此更新时主进程几乎不会等待解码进程，基本上都能直接取到结果。
+!!!!!!!!!!
+
+2. 调用train部分的参数
+需要在调用nmt.train函数的最后加上额外的**bleuvalid_params，并且指定{
+     finish_after,  # 最大更新次数，如700,000，这个是使程序迭代终止的条件，大家可以根据自己以往的经验设置；
+     max_epochs,  # 遍历训练集次数，如50，与finish_after共同决定最大迭代次数；
+     patience  # 用BLEU值作early stop的patience，参照上面bleuvalid_params的推荐参数，因为测试频率比较高，可以设为70
+}
+
+
+二、 bleu_validator.py 新增文件
+里面接收了上述提供的额外参数，并且需要大家在 #TODO 高亮的两个部分，根据自己的实验进行重写：
+1. （如果有修改translate.py的输入）根据自己的实验重写在shell下调用时用的python translate.py命令；
+2. 如果测BLEU用的不是multi-bleu，那么也需要相应修改命令。
+
+此外，为了避免测BLEU配置的问题而导致整个程序退出，在BleuValidator类创建后，会立即用验证集的reference自己跟自己测下BLEU，如果命令出错，则立即退出并提醒：Fail to run script
+
+
+
+
