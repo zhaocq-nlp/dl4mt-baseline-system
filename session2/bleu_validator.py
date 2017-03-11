@@ -93,7 +93,7 @@ class BleuValidator:
             return True, True
         if uidx > 2 * self.val_burn_in and uidx % self.valid_freq_fine_half == 0:
             return True, True
-        if uidx > 2 * self.val_burn_in_fine and uidx % self.valid_freq_fine == 0:
+        if uidx > 2 * self.val_burn_in_fine and uidx % self.valid_freq_final == 0:
             return True, True
         return False, False
 
